@@ -1,0 +1,10 @@
+{
+	"id": "same-window-vault-switcher",
+	"name": "Same-Window Vault Switcher",
+	"version": "1.0.0",
+	"minAppVersion": "1.15.0",
+	"description": "Switch vaults in the current window instead of opening a new one.",
+	"author": "Jonas Flint",
+	"authorUrl": "https://github.com/jonasflint",
+	"isDesktopOnly": true
+}
