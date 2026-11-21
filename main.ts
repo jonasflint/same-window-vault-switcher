@@ -5,7 +5,7 @@ import {
 	Platform,
 	Plugin,
 	PluginSettingTab,
-	Setting,
+	SettingDefinitionItem,
 	SuggestModal,
 	TextFileView,
 } from "obsidian";
@@ -55,15 +55,98 @@ interface VaultEntry {
 	open?: boolean;
 }
 
-type SendSync = (channel: string, ...args: unknown[]) => unknown;
+type VaultList = Record<string, { path: string; ts?: number; open?: boolean }>;
 
-/* eslint-disable @typescript-eslint/no-explicit-any */
-const electron = (): any => (window as any).electron;
-const remote = (): any => electron()?.remote;
-const ipc = (): { sendSync: SendSync } | null => electron()?.ipcRenderer ?? null;
+// ------------------------------------------------------------------ Electron types
+// Minimal typings for the parts of Electron that Obsidian exposes on `window.electron`.
+
+interface Rect {
+	x: number;
+	y: number;
+	width: number;
+	height: number;
+}
+
+interface WebContentsLike {
+	id: number;
+}
+
+interface BrowserWindowLike {
+	id: number;
+	webContents: WebContentsLike;
+	isDestroyed(): boolean;
+	isVisible(): boolean;
+	isMaximized(): boolean;
+	isFullScreen(): boolean;
+	getBounds(): Rect;
+	getNormalBounds(): Rect;
+	setBounds(bounds: Rect): void;
+	maximize(): void;
+	unmaximize(): void;
+	setFullScreen(flag: boolean): void;
+	focus(): void;
+}
+
+interface IpcRendererLike {
+	sendSync: (channel: string, ...args: unknown[]) => unknown;
+}
+
+interface VmLike {
+	runInThisContext(code: string): unknown;
+}
+
+interface RemoteLike {
+	getCurrentWindow(): BrowserWindowLike;
+	getCurrentWebContents(): WebContentsLike;
+	getGlobal(name: string): unknown;
+	require(module: "vm"): VmLike;
+	BrowserWindow: {
+		getAllWindows(): BrowserWindowLike[];
+		fromId(id: number): BrowserWindowLike | null;
+	};
+}
+
+interface ElectronLike {
+	ipcRenderer?: IpcRendererLike;
+	remote?: RemoteLike;
+}
+
+/** The object returned by MAIN_PROCESS_CODE (lives in Obsidian's main process). */
+interface MainApi {
+	version: number;
+	setLog(file: string): string;
+	log(msg: string): string;
+	install(): string;
+	vaultsJson(): string;
+	currentJson(wcId: number): string;
+	findShowing(vaultId: string, excludeWcId: number): number;
+	anyOverrides(): boolean;
+	swap(wcId: number, targetId: string): string;
+}
+
+interface SwapResult {
+	ok: boolean;
+	error?: string;
+}
+
+type SendSync = IpcRendererLike["sendSync"];
+
+const electron = (): ElectronLike | undefined => (window as unknown as { electron?: ElectronLike }).electron;
+const remote = (): RemoteLike | undefined => electron()?.remote;
+const ipc = (): IpcRendererLike | undefined => electron()?.ipcRenderer;
+
+function requireRemote(): RemoteLike {
+	const r = remote();
+	if (!r) throw new Error("@electron/remote is not available");
+	return r;
+}
 
 function norm(p: string): string {
 	return p.replace(/[\\/]+$/, "").toLowerCase();
+}
+
+function errorText(e: unknown): string {
+	return e instanceof Error ? (e.stack ?? e.message) : String(e);
 }
 
 /**
@@ -242,11 +325,11 @@ const MAIN_PROCESS_CODE = String.raw`(function () {
 })()`;
 
 export default class SameWindowVaultSwitcher extends Plugin {
-	settings: Settings = DEFAULT_SETTINGS;
+	settings: Settings = { ...DEFAULT_SETTINGS };
 	private origSendSync: SendSync | null = null;
 	private origClose: (() => void) | null = null;
 	private switching = false;
-	private mainApi: any = null;
+	private mainApi: MainApi | null = null;
 
 	async onload() {
 		if (!Platform.isDesktopApp) return;
@@ -264,9 +347,9 @@ export default class SameWindowVaultSwitcher extends Plugin {
 		if (this.settings.debugLog) {
 			try {
 				this.getMainApi();
-				this.dlog(`plugin loaded in vault ${this.currentVaultPath()} (mode=${this.settings.mode})`);
+				this.dlog(`plugin loaded in vault ${this.currentVaultPath() ?? "?"} (mode=${this.settings.mode})`);
 			} catch (e) {
-				console.error(e);
+				console.error("[same-window-vault-switcher]", e);
 			}
 		}
 	}
@@ -284,27 +367,28 @@ export default class SameWindowVaultSwitcher extends Plugin {
 	private patch() {
 		const r = ipc();
 		if (!r || this.origSendSync) return;
-		const original = r.sendSync;
-		this.origSendSync = original;
-		const plugin = this;
+		const originalRaw = r.sendSync;
+		this.origSendSync = originalRaw;
+		const original = (channel: string, ...args: unknown[]): unknown => originalRaw.call(r, channel, ...args);
 
-		r.sendSync = function (channel: string, ...args: unknown[]) {
-			if (channel === "vault-open" && plugin.settings.enabled && !plugin.switching) {
+		r.sendSync = (channel: string, ...args: unknown[]): unknown => {
+			if (channel === "vault-open" && this.settings.enabled && !this.switching) {
 				const [target, create] = args;
 				if (typeof target === "string") {
-					return plugin.switchTo(target, !!create);
+					return this.switchTo(target, create === true);
 				}
 			}
-			return original.call(this, channel, ...args);
+			return original(channel, ...args);
 		};
 
 		// Obsidian's "Open another vault" modal calls window.close() right after a
 		// successful vault-open. Hold that off while we're mid-switch so we control
 		// exactly when this window goes away (or, in swap mode, that it doesn't).
-		this.origClose = window.close;
-		window.close = function () {
-			if (plugin.switching) return;
-			plugin.origClose?.call(window);
+		const origClose = window.close.bind(window);
+		this.origClose = origClose;
+		window.close = () => {
+			if (this.switching) return;
+			origClose();
 		};
 	}
 
@@ -315,17 +399,16 @@ export default class SameWindowVaultSwitcher extends Plugin {
 	}
 
 	private closeSelf() {
-		(this.origClose ?? window.close).call(window);
+		if (this.origClose) this.origClose();
+		else window.close();
 	}
 
 	// ---------------------------------------------------------------- main api
 
-	private getMainApi(): any {
+	private getMainApi(): MainApi {
 		if (this.mainApi) return this.mainApi;
-		const rm = remote();
-		if (!rm) throw new Error("@electron/remote is not available");
-		const vm = rm.require("vm");
-		const api = vm.runInThisContext(MAIN_PROCESS_CODE);
+		const vm = requireRemote().require("vm");
+		const api = vm.runInThisContext(MAIN_PROCESS_CODE) as MainApi | undefined;
 		if (!api) throw new Error("Main-process hook failed to load");
 		if (this.settings.debugLog) api.setLog(this.settings.debugLog);
 		if (api.install() !== "ok") throw new Error("Main-process hook failed to install");
@@ -334,15 +417,24 @@ export default class SameWindowVaultSwitcher extends Plugin {
 	}
 
 	/** Main api only if the hook is already installed (never installs it). */
-	private existingMainApi(): any {
+	private existingMainApi(): MainApi | null {
 		if (this.mainApi) return this.mainApi;
 		try {
-			const g = remote()?.getGlobal("__sameWindowVaultSwitcher");
+			const g = remote()?.getGlobal("__sameWindowVaultSwitcher") as { api?: unknown } | undefined;
 			if (g && g.api) return this.getMainApi();
-		} catch (e) {
-			/* ignore */
+		} catch {
+			// Not installed or not reachable: treat as absent.
 		}
 		return null;
+	}
+
+	private dlog(msg: string) {
+		if (!this.settings.debugLog) return;
+		try {
+			this.mainApi?.log("[renderer] " + msg);
+		} catch {
+			// Logging is best-effort.
+		}
 	}
 
 	// ---------------------------------------------------------------- helpers
@@ -353,7 +445,7 @@ export default class SameWindowVaultSwitcher extends Plugin {
 	}
 
 	listVaults(): VaultEntry[] {
-		const raw = this.send("vault-list") as Record<string, Omit<VaultEntry, "id">> | undefined;
+		const raw = this.send("vault-list") as VaultList | undefined;
 		if (!raw) return [];
 		return Object.entries(raw)
 			.map(([id, v]) => ({ id, ...v }))
@@ -365,19 +457,19 @@ export default class SameWindowVaultSwitcher extends Plugin {
 		return !!cur && norm(cur) === norm(path);
 	}
 
-	private geometry() {
-		const w = remote().getCurrentWindow();
+	private geometry(): Geometry {
+		const w = requireRemote().getCurrentWindow();
 		const max = w.isMaximized();
 		const full = w.isFullScreen();
 		return { max, full, bounds: max || full ? w.getNormalBounds() : w.getBounds() };
 	}
 
 	/** Put another window exactly where this one is, then close this one. */
-	private takeOver(target: any, geom: ReturnType<SameWindowVaultSwitcher["geometry"]>, waitForShow: boolean) {
+	private takeOver(target: BrowserWindowLike, geom: Geometry, waitForShow: boolean) {
 		try {
 			target.setBounds(geom.bounds);
-		} catch (e) {
-			/* ignore */
+		} catch {
+			// The window may not accept bounds yet; finish() sets them again.
 		}
 
 		const finish = () => {
@@ -389,20 +481,23 @@ export default class SameWindowVaultSwitcher extends Plugin {
 					if (geom.max && !target.isMaximized()) target.maximize();
 				}
 				target.focus();
-			} catch (e) {
-				/* ignore */
+			} catch {
+				// Placement is best-effort; the vault is open either way.
 			}
 			window.setTimeout(() => this.closeSelf(), this.settings.closeDelayMs);
 		};
 
-		if (!waitForShow) return finish();
+		if (!waitForShow) {
+			finish();
+			return;
+		}
 
 		const started = Date.now();
 		const timer = window.setInterval(() => {
-			let visible = false;
+			let visible: boolean;
 			try {
 				visible = target.isDestroyed() || target.isVisible();
-			} catch (e) {
+			} catch {
 				visible = true;
 			}
 			if (visible || Date.now() - started > 8000) {
@@ -410,6 +505,11 @@ export default class SameWindowVaultSwitcher extends Plugin {
 				finish();
 			}
 		}, 25);
+	}
+
+	private findVaultId(api: MainApi, path: string): string | undefined {
+		const list = JSON.parse(api.vaultsJson()) as VaultList;
+		return Object.keys(list).find((k) => norm(list[k]?.path ?? "") === norm(path));
 	}
 
 	// ---------------------------------------------------------------- switching
@@ -425,8 +525,8 @@ export default class SameWindowVaultSwitcher extends Plugin {
 			try {
 				const api = this.existingMainApi();
 				if (api && api.anyOverrides()) useSwap = true;
-			} catch (e) {
-				/* fall through to handoff */
+			} catch {
+				// Fall through to handoff.
 			}
 		}
 
@@ -443,36 +543,32 @@ export default class SameWindowVaultSwitcher extends Plugin {
 
 	private handoff(path: string, create: boolean): unknown {
 		const rm = remote();
-		if (!rm) {
-			// No remote: plain behaviour + close this window.
-			// No remote: can't verify anything, so behave like stock Obsidian.
-			return this.send("vault-open", path, create);
-		}
+		// No remote: can't verify anything, so behave like stock Obsidian.
+		if (!rm) return this.send("vault-open", path, create);
 
 		const geom = this.geometry();
 		const self = rm.getCurrentWindow();
-		const before = new Set<number>(rm.BrowserWindow.getAllWindows().map((w: any) => w.id));
+		const before = new Set<number>(rm.BrowserWindow.getAllWindows().map((w) => w.id));
 
 		const res = this.send("vault-open", path, create);
 		if (res !== true) return res;
 
 		this.switching = true;
-		const fresh = rm.BrowserWindow.getAllWindows().find((w: any) => !before.has(w.id) && !w.isDestroyed());
+		const fresh = rm.BrowserWindow.getAllWindows().find((w) => !before.has(w.id) && !w.isDestroyed());
 		if (fresh) {
 			this.takeOver(fresh, geom, true);
 			return res;
 		}
 
 		// The vault was already open somewhere: Obsidian focused that window.
-		let existing: any = null;
+		let existing: BrowserWindowLike | null = null;
 		try {
 			const api = this.getMainApi();
-			const list: Record<string, { path: string }> = JSON.parse(api.vaultsJson());
-			const id = Object.keys(list).find((k) => norm(list[k].path) === norm(path));
+			const id = this.findVaultId(api, path);
 			const winId = id ? api.findShowing(id, self.webContents.id) : -1;
 			if (winId >= 0) existing = rm.BrowserWindow.fromId(winId);
-		} catch (e) {
-			/* placement is best-effort */
+		} catch {
+			// Placement is best-effort.
 		}
 		if (existing && existing.id !== self.id) {
 			this.takeOver(existing, geom, false);
@@ -485,13 +581,12 @@ export default class SameWindowVaultSwitcher extends Plugin {
 	}
 
 	private swap(path: string): unknown {
-		const rm = remote();
+		const rm = requireRemote();
 		const api = this.getMainApi();
 		const self = rm.getCurrentWindow();
-		const wcId: number = rm.getCurrentWebContents().id;
+		const wcId = rm.getCurrentWebContents().id;
 
-		const list: Record<string, { path: string }> = JSON.parse(api.vaultsJson());
-		const targetId = Object.keys(list).find((k) => norm(list[k].path) === norm(path));
+		const targetId = this.findVaultId(api, path);
 		// Unknown folder (not yet a registered vault): let Obsidian register it the normal way.
 		if (!targetId) return this.handoff(path, false);
 
@@ -511,16 +606,7 @@ export default class SameWindowVaultSwitcher extends Plugin {
 		return true;
 	}
 
-	private dlog(msg: string) {
-		console.log("[same-window-vault-switcher] " + msg);
-		try {
-			this.mainApi?.log("[renderer] " + msg);
-		} catch (e) {
-			/* ignore */
-		}
-	}
-
-	private async doSwap(api: any, wcId: number, targetId: string) {
+	private async doSwap(api: MainApi, wcId: number, targetId: string) {
 		try {
 			this.dlog(`doSwap start wc=${wcId} target=${targetId}`);
 			// Flush unsaved editor content and the workspace layout first.
@@ -529,51 +615,43 @@ export default class SameWindowVaultSwitcher extends Plugin {
 				if (leaf.view instanceof TextFileView) saves.push(leaf.view.save());
 			});
 			await Promise.allSettled(saves);
-			this.dlog(`saved ${saves.length} views`);
 			await this.app.workspace.requestSaveLayout.run();
-			this.dlog("layout saved");
 
-			const res = JSON.parse(api.swap(wcId, targetId));
+			const res = JSON.parse(api.swap(wcId, targetId)) as SwapResult;
 			this.dlog("swap result " + JSON.stringify(res));
-			if (!res.ok) throw new Error(res.error);
-			this.dlog("reloading");
+			if (!res.ok) throw new Error(res.error ?? "Unknown error");
 			window.location.reload();
 		} catch (e) {
 			this.switching = false;
-			this.dlog("doSwap error " + ((e as Error).stack ?? e));
+			this.dlog("doSwap error " + errorText(e));
 			console.error("[same-window-vault-switcher]", e);
-			new Notice(`Couldn't swap vault: ${(e as Error).message}`);
+			new Notice(`Couldn't swap vault: ${e instanceof Error ? e.message : String(e)}`);
 		}
 	}
 
-	// Settings are shared by every vault (localStorage is common to all vault
-	// windows), so switching never lands in a vault with a different mode.
-	private static readonly GLOBAL_KEY = "same-window-vault-switcher:settings";
-
 	async loadSettings() {
-		let global: Partial<Settings> = {};
-		try {
-			global = JSON.parse(localStorage.getItem(SameWindowVaultSwitcher.GLOBAL_KEY) ?? "{}");
-		} catch (e) {
-			/* ignore */
-		}
-		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData(), global);
+		const data = (await this.loadData()) as Partial<Settings> | null;
+		this.settings = { ...DEFAULT_SETTINGS, ...(data ?? {}) };
 	}
 
 	async saveSettings() {
-		try {
-			localStorage.setItem(SameWindowVaultSwitcher.GLOBAL_KEY, JSON.stringify(this.settings));
-		} catch (e) {
-			/* ignore */
-		}
 		await this.saveData(this.settings);
 	}
+}
+
+interface Geometry {
+	max: boolean;
+	full: boolean;
+	bounds: Rect;
 }
 
 // -------------------------------------------------------------------- picker
 
 class VaultPickerModal extends SuggestModal<VaultEntry> {
-	constructor(app: App, private plugin: SameWindowVaultSwitcher) {
+	constructor(
+		app: App,
+		private plugin: SameWindowVaultSwitcher,
+	) {
 		super(app);
 		this.setPlaceholder("Switch to vault…");
 	}
@@ -601,63 +679,60 @@ class VaultPickerModal extends SuggestModal<VaultEntry> {
 // -------------------------------------------------------------------- settings
 
 class SettingsTab extends PluginSettingTab {
-	constructor(app: App, private plugin: SameWindowVaultSwitcher) {
+	constructor(
+		app: App,
+		private plugin: SameWindowVaultSwitcher,
+	) {
 		super(app, plugin);
 	}
 
-	display() {
-		const { containerEl } = this;
-		containerEl.empty();
-
-		new Setting(containerEl)
-			.setName("Use for Obsidian's vault switcher")
-			.setDesc("Apply to the built-in sidebar vault menu and \"Open another vault\". The command palette command always works.")
-			.addToggle((t) =>
-				t.setValue(this.plugin.settings.enabled).onChange(async (v) => {
-					this.plugin.settings.enabled = v;
-					await this.plugin.saveSettings();
-				})
-			);
-
-		new Setting(containerEl)
-			.setName("Mode")
-			.setDesc(
-				"Seamless handoff: the new vault opens exactly where this window is, then this window closes. " +
+	getSettingDefinitions(): SettingDefinitionItem[] {
+		return [
+			{
+				name: "Use for Obsidian's vault switcher",
+				desc: 'Apply to the built-in sidebar vault menu and "Open another vault". The command palette command always works.',
+				control: { type: "toggle", key: "enabled", defaultValue: DEFAULT_SETTINGS.enabled },
+			},
+			{
+				name: "Mode",
+				desc:
+					"Seamless handoff: the new vault opens exactly where this window is, then this window closes. " +
 					"In-place swap (experimental): this same window reloads into the other vault; " +
-					"Obsidian's own bookkeeping still ties the old vault to this window, so obsidian:// links and the CLI for the old vault may land here."
-			)
-			.addDropdown((d) =>
-				d
-					.addOption("handoff", "Seamless handoff (recommended)")
-					.addOption("swap", "In-place swap (experimental)")
-					.setValue(this.plugin.settings.mode)
-					.onChange(async (v) => {
-						this.plugin.settings.mode = v as Mode;
-						await this.plugin.saveSettings();
-					})
-			);
+					"Obsidian's own bookkeeping still ties the old vault to this window, so links and the CLI for the old vault may land here.",
+				control: {
+					type: "dropdown",
+					key: "mode",
+					defaultValue: DEFAULT_SETTINGS.mode,
+					options: {
+						handoff: "Seamless handoff (recommended)",
+						swap: "In-place swap (experimental)",
+					},
+				},
+			},
+			{
+				name: "Close delay (ms)",
+				desc: "Handoff only: wait this long after the new window appears before closing this one.",
+				control: { type: "number", key: "closeDelayMs", defaultValue: DEFAULT_SETTINGS.closeDelayMs, min: 0, step: 10 },
+			},
+			{
+				name: "Debug log file",
+				desc: "Absolute path of a file to write swap diagnostics to. Leave empty to turn logging off.",
+				control: { type: "text", key: "debugLog", defaultValue: DEFAULT_SETTINGS.debugLog, placeholder: "/path/to/swap.log" },
+			},
+		];
+	}
 
-		new Setting(containerEl)
-			.setName("Debug log file")
-			.setDesc("Absolute path of a file to write swap diagnostics to (leave empty to disable).")
-			.addText((t) =>
-				t.setValue(this.plugin.settings.debugLog).onChange(async (v) => {
-					this.plugin.settings.debugLog = v.trim();
-					await this.plugin.saveSettings();
-				})
-			);
+	getControlValue(key: string): unknown {
+		return this.plugin.settings[key as keyof Settings];
+	}
 
-		new Setting(containerEl)
-			.setName("Close delay (ms)")
-			.setDesc("Handoff only: wait this long after the new window appears before closing this one.")
-			.addText((t) =>
-				t.setValue(String(this.plugin.settings.closeDelayMs)).onChange(async (v) => {
-					const n = parseInt(v, 10);
-					if (!isNaN(n) && n >= 0) {
-						this.plugin.settings.closeDelayMs = n;
-						await this.plugin.saveSettings();
-					}
-				})
-			);
+	async setControlValue(key: string, value: unknown): Promise<void> {
+		const s = this.plugin.settings;
+		if (key === "enabled" && typeof value === "boolean") s.enabled = value;
+		else if (key === "mode" && (value === "handoff" || value === "swap")) s.mode = value;
+		else if (key === "closeDelayMs" && typeof value === "number" && value >= 0) s.closeDelayMs = value;
+		else if (key === "debugLog" && typeof value === "string") s.debugLog = value.trim();
+		else return;
+		await this.plugin.saveSettings();
 	}
 }

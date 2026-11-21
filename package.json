@@ -1,12 +1,13 @@
 {
 	"name": "same-window-vault-switcher",
-	"version": "1.0.1",
+	"version": "1.0.2",
 	"description": "Switch vaults in the current window instead of opening a new one.",
 	"main": "main.js",
 	"scripts": {
 		"dev": "node esbuild.config.mjs",
 		"build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
-		"version": "node version-bump.mjs"
+		"version": "node version-bump.mjs",
+		"lint": "eslint ."
 	},
 	"keywords": [
 		"obsidian",
@@ -18,8 +19,11 @@
 	"devDependencies": {
 		"@types/node": "^22.0.0",
 		"esbuild": "^0.25.0",
+		"eslint": "^9.39.5",
+		"eslint-plugin-obsidianmd": "^0.6.0",
 		"obsidian": "^1.14.4",
 		"tslib": "^2.8.1",
-		"typescript": "^5.6.0"
+		"typescript": "^5.6.0",
+		"typescript-eslint": "^8.73.0"
 	}
 }

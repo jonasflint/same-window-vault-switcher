@@ -14,7 +14,7 @@ Switch vaults the way you normally do:
 - Run **Open another vault** from the command palette.
 - Or run this plugin's command, **Switch vault in this window**.
 
-The plugin needs to be installed and enabled in every vault you switch *from*. Its settings are shared by all your vaults, so you only set them once.
+The plugin needs to be installed and enabled in every vault you switch *from*. Settings are saved per vault, like any other plugin's. Once a window has been swapped, the plugin always uses the swap path from that window, whichever mode the current vault has selected, so mixed settings never leave you without a window.
 
 ## Modes
 
@@ -58,6 +58,7 @@ To install it manually, download `main.js` and `manifest.json` from the [latest 
 npm install
 npm run dev      # watch build
 npm run build    # production build
+npm run lint     # Obsidian's official lint rules (same as the community directory scan)
 ```
 
 To release a new version, run `npm version patch --no-git-tag-version` (or `minor` or `major`), commit the changed `package.json`, `manifest.json` and `versions.json`, and push to `main`. The GitHub Action notices the new version in `manifest.json`, builds the plugin, attests the build, and creates a release with a matching tag and `main.js` and `manifest.json` attached.
