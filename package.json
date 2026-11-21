@@ -1,6 +1,6 @@
 {
 	"name": "same-window-vault-switcher",
-	"version": "1.0.0",
+	"version": "1.0.1",
 	"description": "Switch vaults in the current window instead of opening a new one.",
 	"main": "main.js",
 	"scripts": {
@@ -8,7 +8,11 @@
 		"build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
 		"version": "node version-bump.mjs"
 	},
-	"keywords": ["obsidian", "vault", "vault-switcher"],
+	"keywords": [
+		"obsidian",
+		"vault",
+		"vault-switcher"
+	],
 	"author": "Jonas Flint",
 	"license": "MIT",
 	"devDependencies": {

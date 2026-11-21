@@ -11,7 +11,7 @@ import {
 } from "obsidian";
 
 /*
- * Same-Window Vault Switcher
+ * Same Window Vault Switcher
  *
  * How Obsidian (desktop, 1.15.x) handles vaults internally:
  *   - The main process keeps a private map  vaultId -> BrowserWindow.

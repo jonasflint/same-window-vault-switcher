@@ -1,4 +1,4 @@
-# Same-Window Vault Switcher
+# Same Window Vault Switcher
 
 Switch vaults in the current window instead of opening a new one.
 
@@ -18,7 +18,7 @@ The plugin needs to be installed and enabled in every vault you switch *from*. I
 
 ## Modes
 
-Choose a mode in **Settings → Same-Window Vault Switcher**.
+Choose a mode in **Settings → Same Window Vault Switcher**.
 
 ### Seamless handoff (default, recommended)
 
@@ -48,7 +48,7 @@ To follow Obsidian's developer policies, this plugin discloses the following:
 
 ## Installation
 
-From Obsidian: **Settings → Community plugins → Browse**, search for "Same-Window Vault Switcher", then install and enable it.
+From Obsidian: **Settings → Community plugins → Browse**, search for "Same Window Vault Switcher", then install and enable it.
 
 To install it manually, download `main.js` and `manifest.json` from the [latest release](https://github.com/jonasflint/same-window-vault-switcher/releases/latest), copy them into `<vault>/.obsidian/plugins/same-window-vault-switcher/`, then reload Obsidian and enable the plugin.
 
