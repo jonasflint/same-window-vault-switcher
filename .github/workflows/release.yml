@@ -1,9 +1,14 @@
 name: Release
 
+# Publishes a GitHub release whenever manifest.json on main has a version
+# that hasn't been released yet. The release (and its tag) is created by
+# this workflow, so you never have to push tags yourself.
+
 on:
   push:
-    tags:
-      - "*"
+    branches: [main]
+    paths: [manifest.json]
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -11,30 +16,40 @@ permissions:
   attestations: write
 
 jobs:
-  build:
+  release:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
+      - name: Read version
+        id: version
+        run: echo "version=$(node -p "require('./manifest.json').version")" >> "$GITHUB_OUTPUT"
+
+      - name: Check whether this version is already released
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release view "${{ steps.version.outputs.version }}" >/dev/null 2>&1; then
+            echo "Release ${{ steps.version.outputs.version }} already exists, nothing to do."
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - uses: actions/setup-node@v4
+        if: steps.check.outputs.exists == 'false'
         with:
           node-version: "22.x"
 
       - name: Build
+        if: steps.check.outputs.exists == 'false'
         run: |
           npm ci
           npm run build
 
-      - name: Check tag matches manifest version
-        run: |
-          tag="${GITHUB_REF#refs/tags/}"
-          manifest_version=$(node -p "require('./manifest.json').version")
-          if [ "$tag" != "$manifest_version" ]; then
-            echo "Tag $tag does not match manifest.json version $manifest_version"
-            exit 1
-          fi
-
       - name: Attest build provenance
+        if: steps.check.outputs.exists == 'false'
         uses: actions/attest-build-provenance@v2
         with:
           subject-path: |
@@ -42,11 +57,13 @@ jobs:
             manifest.json
 
       - name: Create release
+        if: steps.check.outputs.exists == 'false'
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          tag="${GITHUB_REF#refs/tags/}"
-          gh release create "$tag" \
-            --title="$tag" \
+          v="${{ steps.version.outputs.version }}"
+          gh release create "$v" \
+            --target "$GITHUB_SHA" \
+            --title "$v" \
             --generate-notes \
             main.js manifest.json

@@ -60,7 +60,7 @@ npm run dev      # watch build
 npm run build    # production build
 ```
 
-To release a new version, run `npm version patch` (or `minor` or `major`) and then `git push --follow-tags`. The GitHub Action builds the plugin, attests the build, and attaches `main.js` and `manifest.json` to a new release.
+To release a new version, run `npm version patch --no-git-tag-version` (or `minor` or `major`), commit the changed `package.json`, `manifest.json` and `versions.json`, and push to `main`. The GitHub Action notices the new version in `manifest.json`, builds the plugin, attests the build, and creates a release with a matching tag and `main.js` and `manifest.json` attached.
 
 ## License
 
